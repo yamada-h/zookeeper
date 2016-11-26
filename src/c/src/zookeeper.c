@@ -1369,36 +1369,92 @@ static int send_set_watches(zhandle_t *zh)
     struct oarchive *oa;
     struct RequestHeader h = { STRUCT_INITIALIZER(xid , SET_WATCHES_XID), STRUCT_INITIALIZER(type , ZOO_SETWATCHES_OP)};
     struct SetWatches req;
-    int rc;
+    struct String_vector dataWatchesAll;
+    struct String_vector existWatchesAll;
+    struct String_vector childWatchesAll;
+    int i, max_count, rc;
 
-    req.relativeZxid = zh->last_zxid;
-    req.dataWatches.data = collect_keys(zh->active_node_watchers, (int*)&req.dataWatches.count);
-    req.existWatches.data = collect_keys(zh->active_exist_watchers, (int*)&req.existWatches.count);
-    req.childWatches.data = collect_keys(zh->active_child_watchers, (int*)&req.childWatches.count);
+    dataWatchesAll.data = collect_keys(zh->active_node_watchers, (int*)&dataWatchesAll.count);
+    existWatchesAll.data = collect_keys(zh->active_exist_watchers, (int*)&existWatchesAll.count);
+    childWatchesAll.data = collect_keys(zh->active_child_watchers, (int*)&childWatchesAll.count);
 
     // return if there are no pending watches
-    if (!req.dataWatches.count && !req.existWatches.count &&
-        !req.childWatches.count) {
-        free_key_list(req.dataWatches.data, req.dataWatches.count);
-        free_key_list(req.existWatches.data, req.existWatches.count);
-        free_key_list(req.childWatches.data, req.childWatches.count);
+    if (!dataWatchesAll.count && !existWatchesAll.count &&
+        !childWatchesAll.count) {
+        free_key_list(dataWatchesAll.data, dataWatchesAll.count);
+        free_key_list(existWatchesAll.data, existWatchesAll.count);
+        free_key_list(childWatchesAll.data, childWatchesAll.count);
         return ZOK;
     }
 
+    max_count = dataWatchesAll.count;
+    if (max_count < existWatchesAll.count) max_count = existWatchesAll.count;
+    if (max_count < childWatchesAll.count) max_count = childWatchesAll.count;
 
-    oa = create_buffer_oarchive();
-    rc = serialize_RequestHeader(oa, "header", &h);
-    rc = rc < 0 ? rc : serialize_SetWatches(oa, "req", &req);
-    /* add this buffer to the head of the send queue */
-    rc = rc < 0 ? rc : queue_front_buffer_bytes(&zh->to_send, get_buffer(oa),
-            get_buffer_len(oa));
-    /* We queued the buffer, so don't free it */   
-    close_buffer_oarchive(&oa, 0);
-    free_key_list(req.dataWatches.data, req.dataWatches.count);
-    free_key_list(req.existWatches.data, req.existWatches.count);
-    free_key_list(req.childWatches.data, req.childWatches.count);
+    req.relativeZxid = zh->last_zxid;
+    for(i = 0; i < max_count; i += 1000) {
+        if (i + 1000 <= dataWatchesAll.count) {
+            req.dataWatches.count = 1000;
+            req.dataWatches.data = &dataWatchesAll.data[i];
+        }
+        else if (i < dataWatchesAll.count) {
+            req.dataWatches.count = dataWatchesAll.count % 1000;
+            req.dataWatches.data = &dataWatchesAll.data[i];
+        }
+        else {
+            req.dataWatches.count = 0;
+            req.dataWatches.data = NULL;
+        }
+
+        if (i + 1000 <= existWatchesAll.count) {
+            req.existWatches.count = 1000;
+            req.existWatches.data = &existWatchesAll.data[i];
+        }
+        else if (i < existWatchesAll.count) {
+            req.existWatches.count = existWatchesAll.count % 1000;
+            req.existWatches.data = &existWatchesAll.data[i];
+        }
+        else {
+            req.existWatches.count = 0;
+            req.existWatches.data = NULL;
+        }
+
+        if (i + 1000 <= childWatchesAll.count) {
+            req.childWatches.count = 1000;
+            req.childWatches.data = &childWatchesAll.data[i];
+        }
+        else if (i < childWatchesAll.count) {
+            req.childWatches.count = childWatchesAll.count % 1000;
+            req.childWatches.data = &childWatchesAll.data[i];
+        }
+        else {
+            req.childWatches.count = 0;
+            req.childWatches.data = NULL;
+        }
+
+        oa = create_buffer_oarchive();
+        rc = serialize_RequestHeader(oa, "header", &h);
+        rc = rc < 0 ? rc : serialize_SetWatches(oa, "req", &req);
+        /* add this buffer to the head of the send queue */
+        rc = rc < 0 ? rc : queue_front_buffer_bytes(&zh->to_send, get_buffer(oa),
+                get_buffer_len(oa));
+        /* We queued the buffer, so don't free it */
+        close_buffer_oarchive(&oa, 0);
+
+        if (rc < 0) {
+            free_key_list(dataWatchesAll.data, dataWatchesAll.count);
+            free_key_list(existWatchesAll.data, existWatchesAll.count);
+            free_key_list(childWatchesAll.data, childWatchesAll.count);
+            LOG_DEBUG(("Sending set watches request to %s",format_current_endpoint_info(zh)));
+            return ZMARSHALLINGERROR;
+        }
+    }
+
+    free_key_list(dataWatchesAll.data, dataWatchesAll.count);
+    free_key_list(existWatchesAll.data, existWatchesAll.count);
+    free_key_list(childWatchesAll.data, childWatchesAll.count);
     LOG_DEBUG(("Sending set watches request to %s",format_current_endpoint_info(zh)));
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+    return ZOK;
 }
 
 static int serialize_prime_connect(struct connect_req *req, char* buffer){
